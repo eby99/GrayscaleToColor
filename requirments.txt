@@ -1,0 +1,8 @@
+torch 
+torchvision
+torchaudio
+matplotlib
+pillow
+tqdm
+requests
+streamlit
