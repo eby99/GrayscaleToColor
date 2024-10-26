@@ -1,110 +1,136 @@
 import os
 import torch
-import torchvision
 from torchvision.io import read_image
 from torch import nn
 from torch.utils.data import Dataset, DataLoader, random_split
 import torch.optim as optim
 import torchvision.transforms as transforms
+import torchvision.models as models
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-# Set your device
+# Set your device (CUDA if available, otherwise CPU)
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-# Data
+# Hyperparameters and constants
 MANUAL_SEED = 42
 BATCH_SIZE = 32
+EPOCHS = 20
+LR = 0.0001
 SHUFFLE = True
 
-# Create dataset to load the images
+# Data Augmentation & Transformation
+# Data Augmentation & Transformation
+transform = Compose([
+    Resize((150, 150)),
+    ToTensor(),
+    transforms.Normalize((0.5,), (0.5,))  # Example: normalizing around 0.5 if training followed similar normalization
+])
+
+
+
+# Create a custom Dataset to load images
 class LandscapeDataset(Dataset):
-    def __init__(self, transform=None):
-        self.dataroot = './landscape_Images'
-        self.images = os.listdir(f'{self.dataroot}/color')
+    def __init__(self, dataroot, transform=None):
+        self.dataroot = dataroot
+        self.images = os.listdir(f'{self.dataroot}/color')  # Ensure color images exist
         self.transform = transform
 
     def __len__(self):
         return len(self.images)
 
     def __getitem__(self, idx):
-        # Get image paths
         img_path = self.images[idx]
-        color_img = read_image(f'{self.dataroot}/color/{img_path}') / 255
-        gray_img = read_image(f'{self.dataroot}/gray/{img_path}') / 255
 
+        # Load the corresponding color and grayscale images
+        color_img = read_image(f'{self.dataroot}/color/{img_path}') / 255.0
+        gray_img = read_image(f'{self.dataroot}/gray/{img_path}') / 255.0
+
+        # Apply transformations, if any
         if self.transform:
             color_img = self.transform(color_img)
             gray_img = self.transform(gray_img)
 
-        return color_img, gray_img
+        return gray_img, color_img  # Return grayscale input and color target
 
-# Define transformations
-transform = transforms.Compose([
-    transforms.Resize((150, 150), antialias=False),
-])
+# Initialize dataset and dataloaders
+dataroot = './landscape_Images'
+dataset = LandscapeDataset(dataroot=dataroot, transform=transform)
+train_size = int(0.8 * len(dataset))
+test_size = len(dataset) - train_size
+train_set, test_set = random_split(dataset, [train_size, test_size], generator=torch.Generator().manual_seed(MANUAL_SEED))
 
-# Load the dataset
-dataset = LandscapeDataset(transform=transform)
-train_set, test_set = random_split(dataset, [0.8, 0.2], generator=torch.Generator().manual_seed(MANUAL_SEED))
 trainloader = DataLoader(train_set, batch_size=BATCH_SIZE, shuffle=SHUFFLE)
-testloader = DataLoader(test_set, batch_size=BATCH_SIZE, shuffle=SHUFFLE)
+testloader = DataLoader(test_set, batch_size=BATCH_SIZE, shuffle=False)
 
-# Define the autoencoder model
-class ColorAutoEncoder(nn.Module):
+# Define a more advanced autoencoder model (U-Net based)
+class UNetAutoEncoder(nn.Module):
     def __init__(self):
-        super().__init__()
-        self.down1 = nn.Conv2d(1, 64, 3, stride=2)  # Downsampling layers
-        self.down2 = nn.Conv2d(64, 128, 3, stride=2, padding=1)
-        self.down3 = nn.Conv2d(128, 256, 3, stride=2, padding=1)
-        self.down4 = nn.Conv2d(256, 512, 3, stride=2, padding=1)
-        self.up1 = nn.ConvTranspose2d(512, 256, 3, stride=2, padding=1)
-        self.up2 = nn.ConvTranspose2d(512, 128, 3, stride=2, padding=1)
-        self.up3 = nn.ConvTranspose2d(256, 64, 3, stride=2, padding=1, output_padding=1)
-        self.up4 = nn.ConvTranspose2d(128, 3, 3, stride=2, output_padding=1)
-        self.relu = nn.ReLU()
-        self.sigmoid = nn.Sigmoid()
+        super(UNetAutoEncoder, self).__init__()
+        # Encoder
+        self.encoder = nn.Sequential(
+            nn.Conv2d(1, 64, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(256, 512, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+        )
+        # Decoder (Upsample)
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(512, 256, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(64, 3, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.Sigmoid(),
+        )
 
     def forward(self, x):
-        d1 = self.relu(self.down1(x))
-        d2 = self.relu(self.down2(d1))
-        d3 = self.relu(self.down3(d2))
-        d4 = self.relu(self.down4(d3))
-        u1 = self.relu(self.up1(d4))
-        u2 = self.relu(self.up2(torch.cat((u1, d3), dim=1)))
-        u3 = self.relu(self.up3(torch.cat((u2, d2), dim=1)))
-        u4 = self.sigmoid(self.up4(torch.cat((u3, d1), dim=1)))
-        return u4
+        encoded = self.encoder(x)
+        decoded = self.decoder(encoded)
+        return decoded
 
-# Initialize the model
-model = ColorAutoEncoder().to(DEVICE)
+# Initialize the model, loss function, and optimizer
+model = UNetAutoEncoder().to(DEVICE)
 
-# Initialize the optimizer and loss function
-criterion = nn.MSELoss()
-optimizer = optim.Adam(model.parameters(), lr=0.001)
+# Try using SSIM loss for better visual accuracy, in combination with MSE
+criterion = nn.MSELoss()  # Can also explore perceptual loss or SSIM loss
+optimizer = optim.Adam(model.parameters(), lr=LR)
 
-# Training loop
-EPOCHS = 10
+# Learning rate scheduler
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+
+# Training loop with learning rate scheduling
 for epoch in range(EPOCHS):
     running_loss = 0.0
-    for idx, (color_img, gray_img) in tqdm(enumerate(trainloader), total=len(trainloader)):
-        color_img = color_img.to(DEVICE)
+    model.train()
+    for gray_img, color_img in tqdm(trainloader, total=len(trainloader)):
         gray_img = gray_img.to(DEVICE)
+        color_img = color_img.to(DEVICE)
 
-        # Make model predictions
-        predictions = model(gray_img)
+        # Forward pass
+        output = model(gray_img)
 
+        # Calculate loss
+        loss = criterion(output, color_img)
+
+        # Backpropagation
         optimizer.zero_grad()
-        loss = criterion(color_img, predictions)
-
-        # Calculate gradients and back propagate
         loss.backward()
         optimizer.step()
 
         running_loss += loss.item()
 
-    print(f'Epoch: {epoch + 1}, Loss: {running_loss:.6f}')
+    # Learning rate adjustment
+    scheduler.step(running_loss)
 
-# After training completes, save the model
-torch.save(model.state_dict(), 'color_autoencoder_model.pth')  # Save the model
+    print(f'Epoch {epoch+1}/{EPOCHS}, Loss: {running_loss:.4f}')
+
+# After training, save the model
+torch.save(model.state_dict(), 'color_autoencoder_unet.pth')
 print("Model saved successfully!")
